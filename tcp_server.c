@@ -2,161 +2,212 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <math.h>
 #include "utils.h"
 
+#define numExternals 4     // Number of external processes
+#define EPS 1e-3f
 
-#define numExternals 4     // Number of external processes 
-
+static int listening_socket = -1;
 
 int * establishConnectionsFromExternalProcesses()
 {
-
-    // This socket is used by the server (i.e., Central process) to listen for 
-    // connections from the External process. 
-    int socket_desc;
-
-    // Array containing the file descriptor of each server-client socket. 
-    // There will be 4 client sockets, one for each external process. 
-    //
-    // Note that this array is declared as static so the function can return it 
-    // to the caller function. A static int variable remains in memory while 
-    // the program is running. A normal local variable is destroyed when a 
-    // function call where the variable was declared returns. We want this 
-    // array to persist.   
-    static int client_socket[numExternals]; 
-
+    static int client_socket[numExternals];
     unsigned int client_size;
     struct sockaddr_in server_addr, client_addr;
 
     // Create socket:
-    socket_desc = socket(AF_INET, SOCK_STREAM, 0);
-    
-    if(socket_desc < 0){
-        printf("Error while creating socket\n");
-        exit(0);
+    listening_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (listening_socket < 0)
+    {
+        perror("Error creating socket");
+        exit(1);
     }
-    printf("Socket created successfully\n");
-    
-    // Set port and IP:
+    printf("[Server] Socket created successfully\n");
+
+    // Set port and IP
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(2000);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    
-    // Bind to the set port and IP:
-    if(bind(socket_desc, (struct sockaddr*)&server_addr, sizeof(server_addr))<0){
-        printf("Couldn't bind to the port\n");
-        exit(0);
+    memset(&(server_addr.sin_zero), '\0', 8);
+
+    // Bind to the set port and IP
+    if (bind(listening_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+    {
+        perror("Couldn't bind to the port");
+        close(listening_socket);
+        exit(1);
     }
-    printf("Done with binding\n");
-    
-    // Listen for clients:
-    if(listen(socket_desc, 1) < 0){
-        printf("Error while listening\n");
-        exit(0);
+    printf("[Server] Done with binding\n");
+
+    // Listen for clients
+    if(listen(listening_socket, 5) < 0)
+    {
+        perror("Error while listening");
+        close(listening_socket);
+        exit(1);
     }
-    printf("\n\nListening for incoming connections.....\n\n");
+    printf("\n[Server] Listening for incoming connections on 127.0.0.1:2000\n");
 
     printf("-------------------- Initial connections ---------------------------------\n");
 
-    //========================================================
-    //  Connections from externals 
-    //========================================================
-    int externalCount = 0; 
-    while (externalCount < numExternals){
+    int externalCount = 0;
+    while (externalCount < numExternals)
+    {
+        client_size = sizeof(client_addr);
+        client_socket[externalCount] = accept(listening_socket, (struct sockaddr*)&client_addr, &client_size);
 
-        // Accept an incoming connection:
-        client_socket[externalCount] = accept(socket_desc, (struct sockaddr*)&client_addr, &client_size);
-        
-        if (client_socket[externalCount] < 0){
-            printf("Can't accept\n");
-            exit(0);
+        if (client_socket[externalCount] < 0)
+        {
+            perror("Can't accept");
+            close(listening_socket);
+            exit(1);
         }
 
-        printf("One external process connected at IP: %s and port: %i\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+        printf("[Server] External process connected from %s:%d (slot %d)\n",
+               inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), externalCount);
 
-        externalCount++; 
+        externalCount++;
     }
     printf("--------------------------------------------------------------------------\n");
-    printf("All four external processes are now connected\n");
+    printf("[Server] All four external processes are now connected\n");
     printf("--------------------------------------------------------------------------\n\n");
 
-    return client_socket;   // Pointer to the array of file descriptors of client sockets 
+    // Return pointer to the array of file descriptors of client sockets
+    return client_socket;
 }
 
-
-
-int main(void)
+int main(int argc, char *argv[])
 {
-    int socket_desc; 
-   // unsigned int client_size;
-   // struct sockaddr_in server_addr, client_addr;
+    if (argc < 2)
+    {
+        printf("Usage: %s <initial_central_temperature>\n", argv[0]);
+        return 1;
+    }
 
-    // Messages received from clients (externals). 
-    struct msg messageFromClient;   
-    
+    float centralTemp = atof(argv[1]);
 
-    // Establish client connections and return 
-    // an array of file descriptors of client sockets. 
-    int * client_socket = establishConnectionsFromExternalProcesses(); 
+    struct msg messageFromClient;
 
+    // Establish client connections and return an array of file descriptors
+    int * client_socket = establishConnectionsFromExternalProcesses();
 
+    bool stable = false;
+    bool first_iteration = true;
+    float prev_temperatures[numExternals];
 
-    int stable = false;
-    while ( !stable ){
+    // initialize prev_temperatures with nan so first iteration doesnt accidentally register as stable
+    for (int i = 0; i < numExternals; i++) prev_temperatures[i] = NAN;
 
-        // Array that stores temperatures from clients 
+    while (!stable)
+    {
         float temperature[numExternals];
 
-        // Receive the messages from the 4 external processes 
-        for (int i = 0;  i < numExternals; i++){
+        // Receive messages from the 4 external processes
+        for (int i = 0;  i < numExternals; i++)
+        {
+            ssize_t r = recv(client_socket[i], (void *)&messageFromClient, sizeof(messageFromClient), 0);
 
-            // Receive client's message:
-            if (recv(client_socket[i], (void *)&messageFromClient, sizeof(messageFromClient), 0) < 0){
-                printf("Couldn't receive\n");
-                return -1;
+            if (r <= 0)
+            {
+                if (r == 0)
+                {
+                    printf("[Server] External %d closed connection unexpectedly.\n", i+1);
+                }
+                else
+                {
+                    perror("[Server] recv");
+                }
+                // For this assignment we just exit on errors
+                goto cleanup;
             }
 
             temperature[i] = messageFromClient.T;
-            printf("Temperature of External Process (%d) = %f\n", i, temperature[i]);
-
+            printf("[Server] Received temperature from External (%d) = %.6f\n", messageFromClient.Index, temperature[i]);
         }
 
-        // Modify Temperature 
-        float updatedTemp = temperature[0] + temperature[1] + temperature[2] + temperature[3];
-        updatedTemp += updatedTemp / 4.0;  
-
-
-        // Construct message with updated temperature
-        struct msg updated_msg; 
-        updated_msg.T = updatedTemp;
-        updated_msg.Index = 0;                // Index of central server 
-
-
-        // Send updated temperatures to the 4 external processes 
-        for (int i = 0;  i < numExternals; i++){
-            if (send(client_socket[i], (const void *)&updated_msg, sizeof(updated_msg), 0) < 0){
-                printf("Can't send\n");
-                return -1;
+        // Check stability condition (compare current temps with previous iteration)
+        bool all_within_eps = true;
+        if (!first_iteration)
+        {
+            for (int i = 0; i < numExternals; i++)
+            {
+                float diff = fabsf(temperature[i] - prev_temperatures[i]);
+                if (diff >= EPS)
+                {
+                    all_within_eps = false;
+                    break;
+                }
             }
-        }        
+        }
+        else
+        {
+            // cannot be stable on first iteration
+            all_within_eps = false;
+        }
 
-        printf("\n");
+        // Compute updated central temperature
+        float sum = 0.0f;
+        for (int i = 0; i < numExternals; i++) sum += temperature[i];
 
-        // Check stability condition 
-        if (updatedTemp == 0)
-            stable = true; 
+        float updatedCentral = (2.0f * centralTemp + sum) / 6.0f;
+        printf("[Server] Central temp this iteration: old=%.6f updated=%.6f\n", centralTemp, updatedCentral);
 
+        if (all_within_eps)
+        {
+            stable = true;
+            centralTemp = updatedCentral; // adopt final central
+            printf("\n[Server] System has stabilized. Final central temperature = %.6f\n\n", centralTemp);
+
+            // Send done signal (index is -1) to each external and include final central temp in message.T
+            struct msg done_msg = prepare_message(-1, centralTemp);
+            for (int i = 0; i < numExternals; i++)
+            {
+                if (send(client_socket[i], (const void *)&done_msg, sizeof(done_msg), 0) < 0)
+                {
+                    perror("[Server] Can't send done message");
+                }
+            }
+
+            break;
+        }
+        else
+        {
+            // When not stable, update centralTemp, send updated central temp to each external (index = 0)
+            centralTemp = updatedCentral;
+            struct msg updated_msg = prepare_message(0, centralTemp);
+
+            for (int i = 0; i < numExternals; i++)
+            {
+                if (send(client_socket[i], (const void *)&updated_msg, sizeof(updated_msg), 0) < 0)
+                {
+                    perror("[Server] Can't send updated central temp");
+                    goto cleanup;
+                }
+            }
+
+            // save temps to prev_temperatures for next iteration
+            for (int i = 0; i < numExternals; i++) prev_temperatures[i] = temperature[i];
+            first_iteration = false;
+
+            printf("\n");
+            // continue next iteration where externals will send their updated temps
+        }
     }
- 
-    // Closing all sockets
-    for (int i = 0; i < numExternals; i++)
-        close(client_socket[i]);
 
-    close(socket_desc);
-    
+cleanup:
+    // Close client sockets
+    for (int i = 0; i < numExternals; i++)
+    {
+        if (client_socket[i] >= 0) close(client_socket[i]);
+    }
+    if (listening_socket >= 0) close(listening_socket);
+
+    printf("[Server] Exiting.\n");
+
     return 0;
 }
