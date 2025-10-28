@@ -1,5 +1,40 @@
 # Temperature stabilization using inter-process communication
 
+__To run my program:__
+Open a terminal, navigate to the repo directory, and use the gcc commands given to compile the 3.c and 1 .h files.
+Then run
+   ./server <initial_central_temperature>
+where <initial_central_temperature> is the initial server temperature and can be anything the user wishes.
+
+Then open 4 more separate terminals, navigate to the repo directory, and run:
+   ./client <external index 1..4> <initial_temperature>
+where <external index 1..4> will be the unique numbers 1, 2, 3, and 4 signifying which number terminal you are using and <initial_temperature> is the initial client temperature and can be anything the user wishes.
+
+The server will:
+- Listen on port 2000, and accept up to 4 client connections (external processes)
+- Loop:
+   - Receive a message from each external (their current temperature)
+   - Check for convergence by comparing received temps with temps from previous iteration
+              (EPS tolerance).
+   - Compute updated central temperature:
+              central = (2*central + sum(externals)) / 6
+   - If converged: print final, send done message (Index = -1, T = central) to each external and exit.
+   - Else: send the updated central temperature to each external (Index = 0), then continue.
+
+Each client will:
+- Connect to server
+- Send initial temperature (Index = external index)
+- Loop:
+   - Receive message from server.
+   - If message.Index == -1 => it's "done" signal; print final and exit.
+   - Otherwise message.T is central's temperature; update external temp:
+                 external = (3\*external + 2*central) / 5
+   - Send updated external temp (Index = external index) back to server.
+
+Submission Output:
+![submission_photo](seank_asst5.png)
+
+
 ### :warning: This is a Linux/Unix OS assignment. It is not an OS/161 Assignment
 
 This means that you will not write code for OS/161. Instead, you will write and test your code on a Linux or any Unix-based OS, e.g., the Linux environment that comes with your CSE4001 container or any Linux machine, AWS, Mac OS X (Terminal). 
